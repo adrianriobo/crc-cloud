@@ -1,7 +1,7 @@
 package aws
 
 import (
-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
+	"github.com/crc/crc-cloud/pkg/util/plugin"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
@@ -11,14 +11,14 @@ func GetProvider() *Provider {
 	return &Provider{}
 }
 
-func (a *Provider) GetPlugin() *providerAPI.PluginInfo {
-	return &providerAPI.PluginInfo{
+func (a *Provider) GetPlugin() *plugin.Plugin {
+	return &plugin.Plugin{
 		Name:    "aws",
 		Version: "v5.27.0"}
 }
 
-func (a *Provider) ImportImageRunFunc(projectName, bundleDownloadURL, shasumfileDownloadURL string) (pulumi.RunFunc, error) {
-	r, err := fillImportRequest(projectName, bundleDownloadURL, shasumfileDownloadURL)
+func (a *Provider) ImportImageRunFunc(bundleDownloadURL, shasumfileDownloadURL string) (pulumi.RunFunc, error) {
+	r, err := fillImportRequest(bundleDownloadURL, shasumfileDownloadURL)
 	if err != nil {
 		return nil, err
 	}
@@ -35,9 +35,9 @@ func (a *Provider) CreateParamsMandatory() []string {
 	return []string{amiID}
 }
 
-func (a *Provider) CreateRunFunc(projectName, bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
+func (a *Provider) CreateRunFunc(bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
 	args map[string]string) (pulumi.RunFunc, error) {
-	r, err := fillCreateRequest(projectName, bootingPrivateKeyFilePath, ocpPullSecretFilePath, args)
+	r, err := fillCreateRequest(bootingPrivateKeyFilePath, ocpPullSecretFilePath, args)
 	if err != nil {
 		return nil, err
 	}

@@ -3,7 +3,7 @@ package manager
 import (
 	"fmt"
 
-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
+	"github.com/crc/crc-cloud/pkg/manager/provider"
 	"github.com/crc/crc-cloud/pkg/provider/aws"
 )
 
@@ -15,15 +15,15 @@ const (
 	AZ  Provider = "azure"
 )
 
-func getProvider(provider Provider) (providerAPI.Provider, error) {
-	switch provider {
+func GetProvider(p Provider) (provider.Provider, error) {
+	switch p {
 	case AWS, AZ:
 		return aws.GetProvider(), nil
 	}
-	return nil, fmt.Errorf("%s: provider not supported", provider)
+	return nil, fmt.Errorf("%s: provider not supported", p)
 }
 
-func getSupportedProviders() (sp []providerAPI.Provider) {
+func GetSupportedProviders() (sp []provider.Provider) {
 	sp = append(sp, aws.GetProvider())
 	return
 }

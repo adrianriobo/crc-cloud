@@ -7,7 +7,7 @@ import (
 
 	"github.com/crc/crc-cloud/pkg/bundle"
 	bundleExtract "github.com/crc/crc-cloud/pkg/bundle/extract"
-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
+	"github.com/crc/crc-cloud/pkg/manager/provider"
 	"github.com/crc/crc-cloud/pkg/util/command"
 	"github.com/pulumi/pulumi-aws/sdk/v5/go/aws/ebs"
 	"github.com/pulumi/pulumi-aws/sdk/v5/go/aws/ec2"
@@ -22,14 +22,14 @@ const (
 )
 
 type importRequest struct {
-	projectName           string
+	// projectName           string
 	bundleDownloadURL     string
 	shasumfileDownloadURL string
 }
 
-func fillImportRequest(projectName, bundleDownloadURL, shasumfileDownloadURL string) (*importRequest, error) {
+func fillImportRequest(bundleDownloadURL, shasumfileDownloadURL string) (*importRequest, error) {
 	return &importRequest{
-		projectName:           projectName,
+		// projectName:           projectName,
 		bundleDownloadURL:     bundleDownloadURL,
 		shasumfileDownloadURL: shasumfileDownloadURL,
 	}, nil
@@ -78,8 +78,8 @@ func (r importRequest) runFunc(ctx *pulumi.Context) error {
 	if err != nil {
 		return err
 	}
-	ctx.Export(providerAPI.OutputBootKey, *bootkey)
-	ctx.Export(providerAPI.OutputImageID, ami.ID())
+	ctx.Export(provider.OutputBootKey, *bootkey)
+	ctx.Export(provider.OutputImageID, ami.ID())
 	return nil
 }
 

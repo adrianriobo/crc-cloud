@@ -5,7 +5,9 @@ import (
 
 	"github.com/crc/crc-cloud/pkg/bundle"
 	"github.com/crc/crc-cloud/pkg/bundle/setup"
-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
+	"github.com/crc/crc-cloud/pkg/manager/context"
+	"github.com/crc/crc-cloud/pkg/manager/provider"
+
 	"github.com/crc/crc-cloud/pkg/provider/aws/sg"
 	"github.com/crc/crc-cloud/pkg/util"
 	"github.com/pulumi/pulumi-aws/sdk/v5/go/aws/ec2"
@@ -14,20 +16,18 @@ import (
 )
 
 type createRequest struct {
-	projectName               string
 	amiID                     string
 	bootingPrivateKeyFilePath string
 	ocpPullSecretFilePath     string
 }
 
-func fillCreateRequest(projectName, bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
+func fillCreateRequest(bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
 	args map[string]string) (*createRequest, error) {
 	amiIDValue, ok := args[amiID]
 	if !ok {
 		return nil, fmt.Errorf("amiID not found")
 	}
 	return &createRequest{
-		projectName:               projectName,
 		amiID:                     amiIDValue,
 		bootingPrivateKeyFilePath: bootingPrivateKeyFilePath,
 		ocpPullSecretFilePath:     ocpPullSecretFilePath}, nil
@@ -51,11 +51,9 @@ func (r createRequest) runFunc(ctx *pulumi.Context) error {
 		RootBlockDevice: ec2.InstanceRootBlockDeviceArgs{
 			VolumeSize: pulumi.Int(ocpDefaultRootBlockDeviceSize),
 		},
-		Tags: pulumi.StringMap{
-			"ProjectName": pulumi.String(r.projectName),
-		},
+		Tags: context.GetTags(),
 	}
-	instance, err := ec2.NewInstance(ctx, r.projectName, &args)
+	instance, err := ec2.NewInstance(ctx, context.GetName(), &args)
 	if err != nil {
 		return err
 	}
@@ -80,10 +78,11 @@ func (r createRequest) runFunc(ctx *pulumi.Context) error {
 	if err != nil {
 		return err
 	}
-	ctx.Export(providerAPI.OutputKey, privateKey.PrivateKeyPem)
-	ctx.Export(providerAPI.OutputHost, instance.PublicIp)
-	ctx.Export(providerAPI.OutputUsername, pulumi.String(bundle.ImageUsername))
-	ctx.Export(providerAPI.OutputPassword, password.Result)
+	ctx.Export(provider.OutputKey, privateKey.PrivateKeyPem)
+	ctx.Export(provider.OutputHost, instance.PublicIp)
+	ctx.Export(provider.OutputUsername, pulumi.String(bundle.ImageUsername))
+	ctx.Export(provider.OutputPassword, password.Result)
+
 	return nil
 }
 
@@ -113,7 +112,8 @@ func createKey(ctx *pulumi.Context) (*tls.PrivateKey, *ec2.KeyPair, error) {
 	kp, err := ec2.NewKeyPair(ctx,
 		"OpenshiftLocal-OCP",
 		&ec2.KeyPairArgs{
-			PublicKey: pk.PublicKeyOpenssh})
+			PublicKey: pk.PublicKeyOpenssh,
+			Tags:      context.GetTags()})
 	if err != nil {
 		return nil, nil, err
 	}

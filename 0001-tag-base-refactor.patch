@@ -1,0 +1,914 @@
+From 47a95d9023db787a9193ef45b9ecc32b84e80722 Mon Sep 17 00:00:00 2001
+From: Adrian Riobo Lorenzo <ariobolo@redhat.com>
+Date: Fri, 17 Mar 2023 11:28:47 +0100
+Subject: [PATCH] tag base refactor
+
+---
+ cmd/cmd/constants/constants.go                |   2 +
+ cmd/cmd/create/aws.go                         |   3 +-
+ cmd/cmd/create/create.go                      |   1 +
+ cmd/cmd/import.go                             |   4 +-
+ pkg/manager/context/context.go                |  33 +++++
+ pkg/manager/create.go                         |  69 ++++++++++
+ pkg/manager/destroy.go                        |  13 ++
+ pkg/manager/import.go                         |  56 ++++++++
+ pkg/manager/manager.go                        | 125 ------------------
+ pkg/manager/provider/api/constants.go         |  11 --
+ .../provider/{api/types.go => provider.go}    |  34 ++---
+ pkg/manager/providers.go                      |  10 +-
+ pkg/manager/util.go                           |  58 ++++----
+ pkg/provider/aws/aws.go                       |  14 +-
+ pkg/provider/aws/create-instance.go           |  26 ++--
+ pkg/provider/aws/image-import.go              |  12 +-
+ pkg/provider/aws/sg/sg.go                     |   5 +-
+ pkg/provider/azure/azure.go                   |   7 +-
+ pkg/util/maps/maps.go                         |  10 ++
+ pkg/util/plugin/plugin.go                     |  22 +++
+ 20 files changed, 295 insertions(+), 220 deletions(-)
+ create mode 100644 pkg/manager/context/context.go
+ create mode 100644 pkg/manager/create.go
+ create mode 100644 pkg/manager/destroy.go
+ create mode 100644 pkg/manager/import.go
+ delete mode 100644 pkg/manager/manager.go
+ delete mode 100644 pkg/manager/provider/api/constants.go
+ rename pkg/manager/provider/{api/types.go => provider.go} (50%)
+ create mode 100644 pkg/util/maps/maps.go
+ create mode 100644 pkg/util/plugin/plugin.go
+
+diff --git a/cmd/cmd/constants/constants.go b/cmd/cmd/constants/constants.go
+index 300b964..4389278 100644
+--- a/cmd/cmd/constants/constants.go
++++ b/cmd/cmd/constants/constants.go
+@@ -7,6 +7,8 @@ const (
+ 	BackedURLDesc             string = "backed for stack state. Can be a local path with format file:///path/subpath or s3 s3://existing-bucket"
+ 	OutputFolder              string = "output"
+ 	OutputFolderDesc          string = "path to export assets"
++	Tags                      string = "tags"
++	TagsDesc                  string = "tags to add on each created resource on providers"
+ 	Provider                  string = "provider"
+ 	ProviderDesc              string = "target cloud provider"
+ 	OcpPullSecretFilePath     string = "pullsecret-filepath"
+diff --git a/cmd/cmd/create/aws.go b/cmd/cmd/create/aws.go
+index 6aae3a0..6951370 100644
+--- a/cmd/cmd/create/aws.go
++++ b/cmd/cmd/create/aws.go
+@@ -36,7 +36,8 @@ func getAWSProviderCmd() *cobra.Command {
+ 				manager.AWS,
+ 				providerParams,
+ 				viper.GetString(constants.OcpPullSecretFilePath),
+-				viper.GetString(constants.KeyFilePath)); err != nil {
++				viper.GetString(constants.KeyFilePath),
++				viper.GetStringMapString(constants.Tags)); err != nil {
+ 				fmt.Printf("error creating the cluster with %s provider: %s\n", manager.AWS, err)
+ 				os.Exit(1)
+ 			}
+diff --git a/cmd/cmd/create/create.go b/cmd/cmd/create/create.go
+index bd6c0a8..0a94112 100644
+--- a/cmd/cmd/create/create.go
++++ b/cmd/cmd/create/create.go
+@@ -28,6 +28,7 @@ func GetCreateCmd() *cobra.Command {
+ 	flagSet.StringP(constants.ProjectName, "", "", constants.ProjectNameDesc)
+ 	flagSet.StringP(constants.BackedURL, "", "", constants.BackedURLDesc)
+ 	flagSet.StringP(constants.OutputFolder, "", "", constants.OutputFolderDesc)
++	flagSet.StringToStringP(constants.Tags, "", nil, constants.TagsDesc)
+ 	flagSet.StringP(constants.OcpPullSecretFilePath, "", "", constants.OcpPullSecretFilePathDesc)
+ 	flagSet.StringP(constants.KeyFilePath, "", "", constants.KeyFilePathDesc)
+ 	createCmd.PersistentFlags().AddFlagSet(flagSet)
+diff --git a/cmd/cmd/import.go b/cmd/cmd/import.go
+index 8cc16c0..02428f3 100644
+--- a/cmd/cmd/import.go
++++ b/cmd/cmd/import.go
+@@ -24,6 +24,7 @@ func init() {
+ 	flagSet.StringP(constants.BackedURL, "", "", constants.BackedURLDesc)
+ 	flagSet.StringP(constants.Provider, "", "", constants.ProviderDesc)
+ 	flagSet.StringP(constants.OutputFolder, "", "", constants.OutputFolderDesc)
++	flagSet.StringP(constants.Tags, "", "", constants.TagsDesc)
+ 	flagSet.StringP(constants.BundleDownloadURL, "", "", constants.BundleDownloadURLDesc)
+ 	flagSet.StringP(constants.ShasumfileDownloadURL, "", "", constants.ShasumfileDownloadURLDesc)
+ 	crcCloudImportCmd.Flags().AddFlagSet(flagSet)
+@@ -42,7 +43,8 @@ var crcCloudImportCmd = &cobra.Command{
+ 			viper.GetString(constants.OutputFolder),
+ 			viper.GetString(constants.BundleDownloadURL),
+ 			viper.GetString(constants.ShasumfileDownloadURL),
+-			manager.Provider(viper.GetString(constants.Provider))); err != nil {
++			manager.Provider(viper.GetString(constants.Provider)),
++			viper.GetStringMapString(constants.Tags)); err != nil {
+ 			fmt.Printf("error importing the image: %s\n", err)
+ 			os.Exit(1)
+ 		}
+diff --git a/pkg/manager/context/context.go b/pkg/manager/context/context.go
+new file mode 100644
+index 0000000..f4bd76d
+--- /dev/null
++++ b/pkg/manager/context/context.go
+@@ -0,0 +1,33 @@
++package context
++
++import (
++	"github.com/crc/crc-cloud/pkg/util/maps"
++	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
++)
++
++// Struct holding the information for
++// the pulumi execution
++type context struct {
++	// TODO change to instanceName?
++	projectName string
++	tags        pulumi.StringMap
++}
++
++var c context
++
++func Init(projectName string, tags map[string]string) {
++	c = context{
++		projectName: projectName,
++		tags: maps.Convert(tags,
++			func(name string) string { return name },
++			func(value string) pulumi.StringInput { return pulumi.String(value) }),
++	}
++}
++
++func GetTags() pulumi.StringMap {
++	return c.tags
++}
++
++func GetName() string {
++	return c.projectName
++}
+diff --git a/pkg/manager/create.go b/pkg/manager/create.go
+new file mode 100644
+index 0000000..0dd3d9f
+--- /dev/null
++++ b/pkg/manager/create.go
+@@ -0,0 +1,69 @@
++package manager
++
++import (
++	"github.com/crc/crc-cloud/pkg/manager/context"
++	"github.com/crc/crc-cloud/pkg/manager/provider"
++	"github.com/pulumi/pulumi/sdk/v3/go/auto"
++	"golang.org/x/exp/maps"
++)
++
++const (
++	stackCreate string = "crcCloud-Create"
++)
++
++func CreateParams() (params map[string]string) {
++	params = map[string]string{}
++	for _, p := range GetSupportedProviders() {
++		maps.Copy(params, p.CreateParams())
++	}
++	return
++}
++
++func Create(projectName, backerURL, outputFoler string,
++	sp Provider, providerArgs map[string]string,
++	ocpPullSecretFilePath, bootKeyFilePath string,
++	tags map[string]string) error {
++
++	// Initialize context
++	context.Init(projectName, tags)
++
++	// this will return a provider which implements the api.Provider interface
++	p, err := GetProvider(sp)
++	if err != nil {
++		return err
++	}
++	// TODO think best option to pass params to provider
++	// may serialize all params and let provider validate and pick the required
++	// as a provider the params are specs and manager requires to know about them?
++	err = validateParams(providerArgs, p.CreateParamsMandatory())
++	if err != nil {
++		return err
++	}
++
++	createFunc, err :=
++		p.CreateRunFunc(bootKeyFilePath, ocpPullSecretFilePath,
++			providerArgs)
++	if err != nil {
++		return err
++	}
++
++	stackResult, err := upStack(
++		newStack(stackCreate, backerURL,
++			createFunc, *p.GetPlugin()))
++	if err != nil {
++		return err
++	}
++	return manageCreateResults(stackResult, outputFoler)
++}
++
++func manageCreateResults(stackResult auto.UpResult, destinationFolder string) error {
++	if err := writeOutputs(stackResult, destinationFolder, map[string]string{
++		provider.OutputKey:      "id_rsa",
++		provider.OutputHost:     "host",
++		provider.OutputUsername: "username",
++		provider.OutputPassword: "password",
++	}); err != nil {
++		return err
++	}
++	return nil
++}
+diff --git a/pkg/manager/destroy.go b/pkg/manager/destroy.go
+new file mode 100644
+index 0000000..95de74b
+--- /dev/null
++++ b/pkg/manager/destroy.go
+@@ -0,0 +1,13 @@
++package manager
++
++func Destroy(projectName, backedURL string, sp Provider) error {
++	// this will return a provider which implements the api.Provider interface
++	p, err := GetProvider(sp)
++	if err != nil {
++		return err
++	}
++	return destroyStack(stack{
++		name:           stackCreate,
++		backedURL:      backedURL,
++		providerPlugin: *p.GetPlugin()})
++}
+diff --git a/pkg/manager/import.go b/pkg/manager/import.go
+new file mode 100644
+index 0000000..060861a
+--- /dev/null
++++ b/pkg/manager/import.go
+@@ -0,0 +1,56 @@
++package manager
++
++import (
++	"github.com/crc/crc-cloud/pkg/manager/context"
++	"github.com/crc/crc-cloud/pkg/manager/provider"
++	"github.com/pulumi/pulumi/sdk/v3/go/auto"
++)
++
++const (
++	stackImportImage string = "crcCloud-ImageImport"
++)
++
++func Import(projectName, backerURL, outputFoler string,
++	bundleDownloadURL, shasumfileDownloadURL string, sp Provider,
++	tags map[string]string) error {
++
++	// Initialize context
++	context.Init(projectName, tags)
++
++	// Pick the import function according to the provider
++	p, err := GetProvider(sp)
++	if err != nil {
++		return err
++	}
++	importRunFunc, err :=
++		p.ImportImageRunFunc(bundleDownloadURL, shasumfileDownloadURL)
++	if err != nil {
++		return err
++	}
++	// Create a stack based on the import function and create it
++	stack := newStack(stackImportImage, backerURL,
++		importRunFunc, *p.GetPlugin())
++
++	stackResult, err := upStack(stack)
++	if err != nil {
++		return err
++	}
++	err = manageImageImportResults(stackResult, outputFoler)
++	if err != nil {
++		return nil
++	}
++
++	// Current exec create temporary resources to enable the import
++	// we delete it as they are only temporary
++	return destroyStack(stack)
++}
++
++func manageImageImportResults(stackResult auto.UpResult, destinationFolder string) error {
++	if err := writeOutputs(stackResult, destinationFolder, map[string]string{
++		provider.OutputBootKey: "id_ecdsa",
++		provider.OutputImageID: "image-id",
++	}); err != nil {
++		return err
++	}
++	return nil
++}
+diff --git a/pkg/manager/manager.go b/pkg/manager/manager.go
+deleted file mode 100644
+index 5da6dcd..0000000
+--- a/pkg/manager/manager.go
++++ /dev/null
+@@ -1,125 +0,0 @@
+-package manager
+-
+-import (
+-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
+-	"github.com/pulumi/pulumi/sdk/v3/go/auto"
+-	"golang.org/x/exp/maps"
+-)
+-
+-const (
+-	stackCreate      string = "crcCloud-Create"
+-	stackImportImage string = "crcCloud-ImageImport"
+-)
+-
+-func CreateParams() (params map[string]string) {
+-	params = map[string]string{}
+-	for _, p := range getSupportedProviders() {
+-		maps.Copy(params, p.CreateParams())
+-	}
+-	return
+-}
+-
+-func Import(projectName, backerURL, outputFoler string,
+-	bundleDownloadURL, shasumfileDownloadURL string, provider Provider) error {
+-	// Pick the import function according to the provider
+-	p, err := getProvider(provider)
+-	if err != nil {
+-		return err
+-	}
+-	importRunFunc, err :=
+-		p.ImportImageRunFunc(projectName, bundleDownloadURL, shasumfileDownloadURL)
+-	if err != nil {
+-		return err
+-	}
+-	// Create a stack based on the import function and create it
+-	stack := providerAPI.Stack{
+-		ProjectName: projectName,
+-		StackName:   stackImportImage,
+-		BackedURL:   backerURL,
+-		DeployFunc:  importRunFunc,
+-		Plugin:      *p.GetPlugin()}
+-	stackResult, err := upStack(stack)
+-	if err != nil {
+-		return err
+-	}
+-	err = manageImageImportResults(stackResult, outputFoler)
+-	if err != nil {
+-		return nil
+-	}
+-
+-	// Current exec create temporary resources to enable the import
+-	// we delete it as they are only temporary
+-	return destroyStack(stack)
+-}
+-
+-func manageImageImportResults(stackResult auto.UpResult, destinationFolder string) error {
+-	if err := writeOutputs(stackResult, destinationFolder, map[string]string{
+-		providerAPI.OutputBootKey: "id_ecdsa",
+-		providerAPI.OutputImageID: "image-id",
+-	}); err != nil {
+-		return err
+-	}
+-	return nil
+-}
+-
+-func Create(projectName, backerURL, outputFoler string,
+-	provider Provider, providerArgs map[string]string,
+-	ocpPullSecretFilePath, bootKeyFilePath string) error {
+-	// this will return a provider which implements the api.Provider interface
+-	p, err := getProvider(provider)
+-	if err != nil {
+-		return err
+-	}
+-	// TODO think best option to pass params to provider
+-	// may serialize all params and let provider validate and pick the required
+-	// as a provider the params are specs and manager requires to know about them?
+-	err = validateParams(providerArgs, p.CreateParamsMandatory())
+-	if err != nil {
+-		return err
+-	}
+-
+-	createFunc, err :=
+-		p.CreateRunFunc(projectName, bootKeyFilePath, ocpPullSecretFilePath,
+-			providerArgs)
+-	if err != nil {
+-		return err
+-	}
+-
+-	createStack := providerAPI.Stack{
+-		ProjectName: projectName,
+-		StackName:   stackCreate,
+-		BackedURL:   backerURL,
+-		DeployFunc:  createFunc,
+-		Plugin:      *p.GetPlugin()}
+-	stackResult, err := upStack(createStack)
+-	if err != nil {
+-		return err
+-	}
+-	return manageCreateResults(stackResult, outputFoler)
+-}
+-
+-func Destroy(projectName, backedURL string, provider Provider) error {
+-	// this will return a provider which implements the api.Provider interface
+-	p, err := getProvider(provider)
+-	if err != nil {
+-		return err
+-	}
+-	stack := providerAPI.Stack{
+-		ProjectName: projectName,
+-		StackName:   stackCreate,
+-		BackedURL:   backedURL,
+-		Plugin:      *p.GetPlugin()}
+-	return destroyStack(stack)
+-}
+-
+-func manageCreateResults(stackResult auto.UpResult, destinationFolder string) error {
+-	if err := writeOutputs(stackResult, destinationFolder, map[string]string{
+-		providerAPI.OutputKey:      "id_rsa",
+-		providerAPI.OutputHost:     "host",
+-		providerAPI.OutputUsername: "username",
+-		providerAPI.OutputPassword: "password",
+-	}); err != nil {
+-		return err
+-	}
+-	return nil
+-}
+diff --git a/pkg/manager/provider/api/constants.go b/pkg/manager/provider/api/constants.go
+deleted file mode 100644
+index ee50604..0000000
+--- a/pkg/manager/provider/api/constants.go
++++ /dev/null
+@@ -1,11 +0,0 @@
+-package api
+-
+-const (
+-	OutputKey      string = "private-key"
+-	OutputHost     string = "host"
+-	OutputUsername string = "username"
+-	OutputPassword string = "password"
+-
+-	OutputBootKey string = "bootkey"
+-	OutputImageID string = "image-id"
+-)
+diff --git a/pkg/manager/provider/api/types.go b/pkg/manager/provider/provider.go
+similarity index 50%
+rename from pkg/manager/provider/api/types.go
+rename to pkg/manager/provider/provider.go
+index 04704a8..3e491c8 100644
+--- a/pkg/manager/provider/api/types.go
++++ b/pkg/manager/provider/provider.go
+@@ -1,41 +1,33 @@
+-package api
++package provider
+ 
+ import (
++	"github.com/crc/crc-cloud/pkg/util/plugin"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+ )
+ 
+-// Struct with information about
+-// plugin to manage provider resources
+-type PluginInfo struct {
+-	Name    string
+-	Version string
+-}
++const (
++	OutputKey      string = "private-key"
++	OutputHost     string = "host"
++	OutputUsername string = "username"
++	OutputPassword string = "password"
+ 
+-// Struct holding the information for
+-// the pulumi stack
+-type Stack struct {
+-	ProjectName string
+-	StackName   string
+-	BackedURL   string
+-	DeployFunc  pulumi.RunFunc
+-	Plugin      PluginInfo
+-}
++	OutputBootKey string = "bootkey"
++	OutputImageID string = "image-id"
++)
+ 
+ type Provider interface {
+ 	// Plugin information, required to dynamically install the plugin
+ 	// for the specific provider
+-	GetPlugin() *PluginInfo
++	GetPlugin() *plugin.Plugin
+ 
+ 	// Manage all the image import process for the specific provider
+-	ImportImageRunFunc(projectName,
+-		bundleDownloadURL, shasumfileDownloadURL string) (pulumi.RunFunc, error)
++	ImportImageRunFunc(bundleDownloadURL, shasumfileDownloadURL string) (pulumi.RunFunc, error)
+ 
+ 	// Set of params tied to provider to customize the create operation
+ 	CreateParams() map[string]string
+ 	// Subset of create params which are mandatory
+ 	CreateParamsMandatory() []string
+ 	// Creates all resources for the specific provider required on the create operation
+-	CreateRunFunc(projectName,
+-		bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
++	CreateRunFunc(bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
+ 		args map[string]string) (pulumi.RunFunc, error)
+ }
+diff --git a/pkg/manager/providers.go b/pkg/manager/providers.go
+index b6ec4dd..4ec3f04 100644
+--- a/pkg/manager/providers.go
++++ b/pkg/manager/providers.go
+@@ -3,7 +3,7 @@ package manager
+ import (
+ 	"fmt"
+ 
+-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
++	"github.com/crc/crc-cloud/pkg/manager/provider"
+ 	"github.com/crc/crc-cloud/pkg/provider/aws"
+ )
+ 
+@@ -15,15 +15,15 @@ const (
+ 	AZ  Provider = "azure"
+ )
+ 
+-func getProvider(provider Provider) (providerAPI.Provider, error) {
+-	switch provider {
++func GetProvider(p Provider) (provider.Provider, error) {
++	switch p {
+ 	case AWS, AZ:
+ 		return aws.GetProvider(), nil
+ 	}
+-	return nil, fmt.Errorf("%s: provider not supported", provider)
++	return nil, fmt.Errorf("%s: provider not supported", p)
+ }
+ 
+-func getSupportedProviders() (sp []providerAPI.Provider) {
++func GetSupportedProviders() (sp []provider.Provider) {
+ 	sp = append(sp, aws.GetProvider())
+ 	return
+ }
+diff --git a/pkg/manager/util.go b/pkg/manager/util.go
+index b005d37..4495910 100644
+--- a/pkg/manager/util.go
++++ b/pkg/manager/util.go
+@@ -6,15 +6,35 @@ import (
+ 	"os"
+ 	"path"
+ 
+-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
++	crcContext "github.com/crc/crc-cloud/pkg/manager/context"
++	"github.com/crc/crc-cloud/pkg/util/plugin"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optdestroy"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
++	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+ )
+ 
++type stack struct {
++	name           string
++	backedURL      string
++	deployFunc     pulumi.RunFunc
++	providerPlugin plugin.Plugin
++}
++
++func newStack(name, backedURL string,
++	deployFunc pulumi.RunFunc,
++	providerPlugin plugin.Plugin) stack {
++	return stack{
++		name:           name,
++		backedURL:      backedURL,
++		deployFunc:     deployFunc,
++		providerPlugin: providerPlugin,
++	}
++}
++
+ func validateParams(args map[string]string, required []string) error {
+ 	var requiredMissing []string
+ 	for _, r := range required {
+@@ -30,48 +50,48 @@ func validateParams(args map[string]string, required []string) error {
+ 	return nil
+ }
+ 
+-func upStack(targetStack providerAPI.Stack) (auto.UpResult, error) {
++func upStack(s stack) (auto.UpResult, error) {
+ 	ctx := context.Background()
+-	objectStack := getStack(ctx, targetStack)
++	objectStack := getStack(ctx, s)
+ 	stdoutStreamer := optup.ProgressStreams(os.Stdout)
+ 	return objectStack.Up(ctx, stdoutStreamer)
+ }
+ 
+-func destroyStack(targetStack providerAPI.Stack) (err error) {
++func destroyStack(s stack) (err error) {
+ 	ctx := context.Background()
+-	objectStack := getStack(ctx, targetStack)
++	objectStack := getStack(ctx, s)
+ 	stdoutStreamer := optdestroy.ProgressStreams(os.Stdout)
+ 	if _, err = objectStack.Destroy(ctx, stdoutStreamer); err != nil {
+ 		return
+ 	}
+-	err = objectStack.Workspace().RemoveStack(ctx, targetStack.StackName)
++	err = objectStack.Workspace().RemoveStack(ctx, s.name)
+ 	return
+ }
+ 
+ // this function gets our stack ready for update/destroy by prepping the workspace, init/selecting the stack
+ // and doing a refresh to make sure state and cloud resources are in sync
+-func getStack(ctx context.Context, target providerAPI.Stack) auto.Stack {
++func getStack(ctx context.Context, s stack) auto.Stack {
+ 	// create or select a stack with an inline Pulumi program
+-	s, err := auto.UpsertStackInlineSource(ctx, target.StackName,
+-		target.ProjectName, target.DeployFunc, getOpts(target)...)
++	ps, err := auto.UpsertStackInlineSource(ctx, s.name,
++		crcContext.GetName(), s.deployFunc, getOpts(s)...)
+ 	if err != nil {
+ 		logging.Errorf("%v", err)
+ 		os.Exit(1)
+ 	}
+-	if err = postStack(ctx, target, &s); err != nil {
++	if err = s.providerPlugin.Install(ctx, &ps); err != nil {
+ 		logging.Errorf("%v", err)
+ 		os.Exit(1)
+ 	}
+-	return s
++	return ps
+ }
+ 
+-func getOpts(target providerAPI.Stack) []auto.LocalWorkspaceOption {
++func getOpts(s stack) []auto.LocalWorkspaceOption {
+ 	return []auto.LocalWorkspaceOption{
+ 		auto.Project(workspace.Project{
+-			Name:    tokens.PackageName(target.ProjectName),
++			Name:    tokens.PackageName(crcContext.GetName()),
+ 			Runtime: workspace.NewProjectRuntimeInfo("go", nil),
+ 			Backend: &workspace.ProjectBackend{
+-				URL: target.BackedURL,
++				URL: s.backedURL,
+ 			},
+ 		}),
+ 		auto.WorkDir("."),
+@@ -79,16 +99,6 @@ func getOpts(target providerAPI.Stack) []auto.LocalWorkspaceOption {
+ 	}
+ }
+ 
+-func postStack(ctx context.Context, target providerAPI.Stack, stack *auto.Stack) (err error) {
+-	w := stack.Workspace()
+-	// for inline source programs, we must manage plugins ourselves
+-	if err = w.InstallPlugin(ctx, target.Plugin.Name, target.Plugin.Version); err != nil {
+-		return
+-	}
+-	_, err = stack.Refresh(ctx)
+-	return
+-}
+-
+ func writeOutputs(stackResult auto.UpResult,
+ 	destinationFolder string, results map[string]string) (err error) {
+ 	for k, v := range results {
+diff --git a/pkg/provider/aws/aws.go b/pkg/provider/aws/aws.go
+index 53118d1..7e90365 100644
+--- a/pkg/provider/aws/aws.go
++++ b/pkg/provider/aws/aws.go
+@@ -1,7 +1,7 @@
+ package aws
+ 
+ import (
+-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
++	"github.com/crc/crc-cloud/pkg/util/plugin"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+ )
+ 
+@@ -11,14 +11,14 @@ func GetProvider() *Provider {
+ 	return &Provider{}
+ }
+ 
+-func (a *Provider) GetPlugin() *providerAPI.PluginInfo {
+-	return &providerAPI.PluginInfo{
++func (a *Provider) GetPlugin() *plugin.Plugin {
++	return &plugin.Plugin{
+ 		Name:    "aws",
+ 		Version: "v5.27.0"}
+ }
+ 
+-func (a *Provider) ImportImageRunFunc(projectName, bundleDownloadURL, shasumfileDownloadURL string) (pulumi.RunFunc, error) {
+-	r, err := fillImportRequest(projectName, bundleDownloadURL, shasumfileDownloadURL)
++func (a *Provider) ImportImageRunFunc(bundleDownloadURL, shasumfileDownloadURL string) (pulumi.RunFunc, error) {
++	r, err := fillImportRequest(bundleDownloadURL, shasumfileDownloadURL)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -35,9 +35,9 @@ func (a *Provider) CreateParamsMandatory() []string {
+ 	return []string{amiID}
+ }
+ 
+-func (a *Provider) CreateRunFunc(projectName, bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
++func (a *Provider) CreateRunFunc(bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
+ 	args map[string]string) (pulumi.RunFunc, error) {
+-	r, err := fillCreateRequest(projectName, bootingPrivateKeyFilePath, ocpPullSecretFilePath, args)
++	r, err := fillCreateRequest(bootingPrivateKeyFilePath, ocpPullSecretFilePath, args)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/pkg/provider/aws/create-instance.go b/pkg/provider/aws/create-instance.go
+index 06233ab..eeb4869 100644
+--- a/pkg/provider/aws/create-instance.go
++++ b/pkg/provider/aws/create-instance.go
+@@ -5,7 +5,9 @@ import (
+ 
+ 	"github.com/crc/crc-cloud/pkg/bundle"
+ 	"github.com/crc/crc-cloud/pkg/bundle/setup"
+-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
++	"github.com/crc/crc-cloud/pkg/manager/context"
++	"github.com/crc/crc-cloud/pkg/manager/provider"
++
+ 	"github.com/crc/crc-cloud/pkg/provider/aws/sg"
+ 	"github.com/crc/crc-cloud/pkg/util"
+ 	"github.com/pulumi/pulumi-aws/sdk/v5/go/aws/ec2"
+@@ -14,20 +16,18 @@ import (
+ )
+ 
+ type createRequest struct {
+-	projectName               string
+ 	amiID                     string
+ 	bootingPrivateKeyFilePath string
+ 	ocpPullSecretFilePath     string
+ }
+ 
+-func fillCreateRequest(projectName, bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
++func fillCreateRequest(bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
+ 	args map[string]string) (*createRequest, error) {
+ 	amiIDValue, ok := args[amiID]
+ 	if !ok {
+ 		return nil, fmt.Errorf("amiID not found")
+ 	}
+ 	return &createRequest{
+-		projectName:               projectName,
+ 		amiID:                     amiIDValue,
+ 		bootingPrivateKeyFilePath: bootingPrivateKeyFilePath,
+ 		ocpPullSecretFilePath:     ocpPullSecretFilePath}, nil
+@@ -51,11 +51,9 @@ func (r createRequest) runFunc(ctx *pulumi.Context) error {
+ 		RootBlockDevice: ec2.InstanceRootBlockDeviceArgs{
+ 			VolumeSize: pulumi.Int(ocpDefaultRootBlockDeviceSize),
+ 		},
+-		Tags: pulumi.StringMap{
+-			"ProjectName": pulumi.String(r.projectName),
+-		},
++		Tags: context.GetTags(),
+ 	}
+-	instance, err := ec2.NewInstance(ctx, r.projectName, &args)
++	instance, err := ec2.NewInstance(ctx, context.GetName(), &args)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -80,10 +78,11 @@ func (r createRequest) runFunc(ctx *pulumi.Context) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	ctx.Export(providerAPI.OutputKey, privateKey.PrivateKeyPem)
+-	ctx.Export(providerAPI.OutputHost, instance.PublicIp)
+-	ctx.Export(providerAPI.OutputUsername, pulumi.String(bundle.ImageUsername))
+-	ctx.Export(providerAPI.OutputPassword, password.Result)
++	ctx.Export(provider.OutputKey, privateKey.PrivateKeyPem)
++	ctx.Export(provider.OutputHost, instance.PublicIp)
++	ctx.Export(provider.OutputUsername, pulumi.String(bundle.ImageUsername))
++	ctx.Export(provider.OutputPassword, password.Result)
++
+ 	return nil
+ }
+ 
+@@ -113,7 +112,8 @@ func createKey(ctx *pulumi.Context) (*tls.PrivateKey, *ec2.KeyPair, error) {
+ 	kp, err := ec2.NewKeyPair(ctx,
+ 		"OpenshiftLocal-OCP",
+ 		&ec2.KeyPairArgs{
+-			PublicKey: pk.PublicKeyOpenssh})
++			PublicKey: pk.PublicKeyOpenssh,
++			Tags:      context.GetTags()})
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+diff --git a/pkg/provider/aws/image-import.go b/pkg/provider/aws/image-import.go
+index 9ca6d03..94a06c5 100644
+--- a/pkg/provider/aws/image-import.go
++++ b/pkg/provider/aws/image-import.go
+@@ -7,7 +7,7 @@ import (
+ 
+ 	"github.com/crc/crc-cloud/pkg/bundle"
+ 	bundleExtract "github.com/crc/crc-cloud/pkg/bundle/extract"
+-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
++	"github.com/crc/crc-cloud/pkg/manager/provider"
+ 	"github.com/crc/crc-cloud/pkg/util/command"
+ 	"github.com/pulumi/pulumi-aws/sdk/v5/go/aws/ebs"
+ 	"github.com/pulumi/pulumi-aws/sdk/v5/go/aws/ec2"
+@@ -22,14 +22,14 @@ const (
+ )
+ 
+ type importRequest struct {
+-	projectName           string
++	// projectName           string
+ 	bundleDownloadURL     string
+ 	shasumfileDownloadURL string
+ }
+ 
+-func fillImportRequest(projectName, bundleDownloadURL, shasumfileDownloadURL string) (*importRequest, error) {
++func fillImportRequest(bundleDownloadURL, shasumfileDownloadURL string) (*importRequest, error) {
+ 	return &importRequest{
+-		projectName:           projectName,
++		// projectName:           projectName,
+ 		bundleDownloadURL:     bundleDownloadURL,
+ 		shasumfileDownloadURL: shasumfileDownloadURL,
+ 	}, nil
+@@ -78,8 +78,8 @@ func (r importRequest) runFunc(ctx *pulumi.Context) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	ctx.Export(providerAPI.OutputBootKey, *bootkey)
+-	ctx.Export(providerAPI.OutputImageID, ami.ID())
++	ctx.Export(provider.OutputBootKey, *bootkey)
++	ctx.Export(provider.OutputImageID, ami.ID())
+ 	return nil
+ }
+ 
+diff --git a/pkg/provider/aws/sg/sg.go b/pkg/provider/aws/sg/sg.go
+index 7827a9b..d2fee2b 100644
+--- a/pkg/provider/aws/sg/sg.go
++++ b/pkg/provider/aws/sg/sg.go
+@@ -1,6 +1,7 @@
+ package sg
+ 
+ import (
++	"github.com/crc/crc-cloud/pkg/manager/context"
+ 	"github.com/pulumi/pulumi-aws/sdk/v5/go/aws/ec2"
+ 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+ )
+@@ -24,9 +25,7 @@ func Create(ctx *pulumi.Context, rules []IngressRule,
+ 			VpcId:       pulumi.String(vpc.Id),
+ 			Ingress:     getSecurityGroupIngressArray(rules),
+ 			Egress:      ec2.SecurityGroupEgressArray{egressAll},
+-			Tags: pulumi.StringMap{
+-				"Name": pulumi.String(name),
+-			},
++			Tags:        context.GetTags(),
+ 		})
+ 	if err != nil {
+ 		return pulumi.IDOutput{}, err
+diff --git a/pkg/provider/azure/azure.go b/pkg/provider/azure/azure.go
+index b2e26bd..0fec3f2 100644
+--- a/pkg/provider/azure/azure.go
++++ b/pkg/provider/azure/azure.go
+@@ -1,7 +1,8 @@
+ package azure
+ 
+ import (
+-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
++	"github.com/crc/crc-cloud/pkg/util/plugin"
++
+ 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+ )
+ 
+@@ -16,8 +17,8 @@ func GetProvider() *Provider {
+ 	return &Provider{}
+ }
+ 
+-func (a *Provider) GetPlugin() *providerAPI.PluginInfo {
+-	return &providerAPI.PluginInfo{
++func (a *Provider) GetPlugin() *plugin.Plugin {
++	return &plugin.Plugin{
+ 		Name:    azureNativePluginName,
+ 		Version: azureNativePluginVersion}
+ }
+diff --git a/pkg/util/maps/maps.go b/pkg/util/maps/maps.go
+new file mode 100644
+index 0000000..a5061eb
+--- /dev/null
++++ b/pkg/util/maps/maps.go
+@@ -0,0 +1,10 @@
++package maps
++
++func Convert[X comparable, Y any, Z comparable, V any](source map[X]Y,
++	convertX func(x X) Z, convertY func(y Y) V) map[Z]V {
++	var result = make(map[Z]V)
++	for k, v := range source {
++		result[convertX(k)] = convertY(v)
++	}
++	return result
++}
+diff --git a/pkg/util/plugin/plugin.go b/pkg/util/plugin/plugin.go
+new file mode 100644
+index 0000000..0be866f
+--- /dev/null
++++ b/pkg/util/plugin/plugin.go
+@@ -0,0 +1,22 @@
++package plugin
++
++import (
++	"context"
++
++	"github.com/pulumi/pulumi/sdk/v3/go/auto"
++)
++
++// Struct with information about
++// plugin to manage provider resources
++type Plugin struct {
++	Name    string
++	Version string
++}
++
++func (p *Plugin) Install(ctx context.Context, s *auto.Stack) (err error) {
++	if err = s.Workspace().InstallPlugin(ctx, p.Name, p.Version); err != nil {
++		return
++	}
++	_, err = s.Refresh(ctx)
++	return
++}
+-- 
+2.31.1
+

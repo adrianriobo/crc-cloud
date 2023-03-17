@@ -1,7 +1,8 @@
 package azure
 
 import (
-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
+	"github.com/crc/crc-cloud/pkg/util/plugin"
+
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
@@ -16,8 +17,8 @@ func GetProvider() *Provider {
 	return &Provider{}
 }
 
-func (a *Provider) GetPlugin() *providerAPI.PluginInfo {
-	return &providerAPI.PluginInfo{
+func (a *Provider) GetPlugin() *plugin.Plugin {
+	return &plugin.Plugin{
 		Name:    azureNativePluginName,
 		Version: azureNativePluginVersion}
 }

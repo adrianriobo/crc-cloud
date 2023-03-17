@@ -6,14 +6,34 @@ import (
 	"os"
 	"path"
 
-	providerAPI "github.com/crc/crc-cloud/pkg/manager/provider/api"
+	crcContext "github.com/crc/crc-cloud/pkg/manager/context"
+	"github.com/crc/crc-cloud/pkg/util/plugin"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optdestroy"
 	"github.com/pulumi/pulumi/sdk/v3/go/auto/optup"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
+
+type stack struct {
+	name           string
+	backedURL      string
+	deployFunc     pulumi.RunFunc
+	providerPlugin plugin.Plugin
+}
+
+func newStack(name, backedURL string,
+	deployFunc pulumi.RunFunc,
+	providerPlugin plugin.Plugin) stack {
+	return stack{
+		name:           name,
+		backedURL:      backedURL,
+		deployFunc:     deployFunc,
+		providerPlugin: providerPlugin,
+	}
+}
 
 func validateParams(args map[string]string, required []string) error {
 	var requiredMissing []string
@@ -30,63 +50,53 @@ func validateParams(args map[string]string, required []string) error {
 	return nil
 }
 
-func upStack(targetStack providerAPI.Stack) (auto.UpResult, error) {
+func upStack(s stack) (auto.UpResult, error) {
 	ctx := context.Background()
-	objectStack := getStack(ctx, targetStack)
+	objectStack := getStack(ctx, s)
 	stdoutStreamer := optup.ProgressStreams(os.Stdout)
 	return objectStack.Up(ctx, stdoutStreamer)
 }
 
-func destroyStack(targetStack providerAPI.Stack) (err error) {
+func destroyStack(s stack) (err error) {
 	ctx := context.Background()
-	objectStack := getStack(ctx, targetStack)
+	objectStack := getStack(ctx, s)
 	stdoutStreamer := optdestroy.ProgressStreams(os.Stdout)
 	if _, err = objectStack.Destroy(ctx, stdoutStreamer); err != nil {
 		return
 	}
-	err = objectStack.Workspace().RemoveStack(ctx, targetStack.StackName)
+	err = objectStack.Workspace().RemoveStack(ctx, s.name)
 	return
 }
 
 // this function gets our stack ready for update/destroy by prepping the workspace, init/selecting the stack
 // and doing a refresh to make sure state and cloud resources are in sync
-func getStack(ctx context.Context, target providerAPI.Stack) auto.Stack {
+func getStack(ctx context.Context, s stack) auto.Stack {
 	// create or select a stack with an inline Pulumi program
-	s, err := auto.UpsertStackInlineSource(ctx, target.StackName,
-		target.ProjectName, target.DeployFunc, getOpts(target)...)
+	ps, err := auto.UpsertStackInlineSource(ctx, s.name,
+		crcContext.GetName(), s.deployFunc, getOpts(s)...)
 	if err != nil {
 		logging.Errorf("%v", err)
 		os.Exit(1)
 	}
-	if err = postStack(ctx, target, &s); err != nil {
+	if err = s.providerPlugin.Install(ctx, &ps); err != nil {
 		logging.Errorf("%v", err)
 		os.Exit(1)
 	}
-	return s
+	return ps
 }
 
-func getOpts(target providerAPI.Stack) []auto.LocalWorkspaceOption {
+func getOpts(s stack) []auto.LocalWorkspaceOption {
 	return []auto.LocalWorkspaceOption{
 		auto.Project(workspace.Project{
-			Name:    tokens.PackageName(target.ProjectName),
+			Name:    tokens.PackageName(crcContext.GetName()),
 			Runtime: workspace.NewProjectRuntimeInfo("go", nil),
 			Backend: &workspace.ProjectBackend{
-				URL: target.BackedURL,
+				URL: s.backedURL,
 			},
 		}),
 		auto.WorkDir("."),
 		// auto.SecretsProvider("awskms://alias/pulumi-secret-encryption"),
 	}
-}
-
-func postStack(ctx context.Context, target providerAPI.Stack, stack *auto.Stack) (err error) {
-	w := stack.Workspace()
-	// for inline source programs, we must manage plugins ourselves
-	if err = w.InstallPlugin(ctx, target.Plugin.Name, target.Plugin.Version); err != nil {
-		return
-	}
-	_, err = stack.Refresh(ctx)
-	return
 }
 
 func writeOutputs(stackResult auto.UpResult,

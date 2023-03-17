@@ -1,41 +1,33 @@
-package api
+package provider
 
 import (
+	"github.com/crc/crc-cloud/pkg/util/plugin"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-// Struct with information about
-// plugin to manage provider resources
-type PluginInfo struct {
-	Name    string
-	Version string
-}
+const (
+	OutputKey      string = "private-key"
+	OutputHost     string = "host"
+	OutputUsername string = "username"
+	OutputPassword string = "password"
 
-// Struct holding the information for
-// the pulumi stack
-type Stack struct {
-	ProjectName string
-	StackName   string
-	BackedURL   string
-	DeployFunc  pulumi.RunFunc
-	Plugin      PluginInfo
-}
+	OutputBootKey string = "bootkey"
+	OutputImageID string = "image-id"
+)
 
 type Provider interface {
 	// Plugin information, required to dynamically install the plugin
 	// for the specific provider
-	GetPlugin() *PluginInfo
+	GetPlugin() *plugin.Plugin
 
 	// Manage all the image import process for the specific provider
-	ImportImageRunFunc(projectName,
-		bundleDownloadURL, shasumfileDownloadURL string) (pulumi.RunFunc, error)
+	ImportImageRunFunc(bundleDownloadURL, shasumfileDownloadURL string) (pulumi.RunFunc, error)
 
 	// Set of params tied to provider to customize the create operation
 	CreateParams() map[string]string
 	// Subset of create params which are mandatory
 	CreateParamsMandatory() []string
 	// Creates all resources for the specific provider required on the create operation
-	CreateRunFunc(projectName,
-		bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
+	CreateRunFunc(bootingPrivateKeyFilePath, ocpPullSecretFilePath string,
 		args map[string]string) (pulumi.RunFunc, error)
 }
