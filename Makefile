@@ -2,11 +2,15 @@ VERSION ?= 0.0.2
 CONTAINER_MANAGER ?= podman
 # Image URL to use all building/pushing image targets
 IMG ?= quay.io/crcont/crc-cloud:v${VERSION}
+ORG := github.com/crc-org
+REPOPATH ?= $(ORG)/crc-cloud
 
 # Go and compilation related variables
 GOPATH ?= $(shell go env GOPATH)
 BUILD_DIR ?= out
 SOURCE_DIRS = cmd pkg
+
+VERSION_VARIABLES := -X $(REPOPATH)/pkg/version.version=$(VERSION) 
 # https://golang.org/cmd/link/
 LDFLAGS := $(VERSION_VARIABLES) -extldflags='-static' ${GO_EXTRA_LDFLAGS}
 GCFLAGS := all=-N -l
