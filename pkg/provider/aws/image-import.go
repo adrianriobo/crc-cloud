@@ -26,6 +26,7 @@ type importRequest struct {
 	projectName           string
 	bundleDownloadURL     string
 	shasumfileDownloadURL string
+	remote                bool
 }
 
 func fillImportRequest(projectName, bundleDownloadURL, shasumfileDownloadURL string) (*importRequest, error) {
@@ -37,6 +38,60 @@ func fillImportRequest(projectName, bundleDownloadURL, shasumfileDownloadURL str
 }
 
 func (r importRequest) runFunc(ctx *pulumi.Context) error {
+	if r.remote {
+		return r.runFuncRemote(ctx)
+	}
+	return r.runFuncLocal(ctx)
+}
+
+func (r importRequest) runFuncRemote(ctx *pulumi.Context) error {
+
+	// ecsTaskExecutionRole, roleDependecy, err := createVMIEmportExportRole(ctx, id)
+	// if err != nil {
+	// 	return err
+	// }
+
+	// tmpJSON0, err := json.Marshal([]interface{}{
+	// 	map[string]interface{}{
+	// 		"name":      "first",
+	// 		"image":     "service-first",
+	// 		"cpu":       10,
+	// 		"memory":    512,
+	// 		"essential": true,
+	// 		"portMappings": []map[string]interface{}{
+	// 			{
+	// 				"containerPort": 80,
+	// 				"hostPort":      80,
+	// 			},
+	// 		},
+	// 	}})
+	// if err != nil {
+	// 	return err
+	// }
+	// json0 := string(tmpJSON0)
+
+	// _, err = ecs.NewTaskDefinition(ctx, "test",
+	// 	&ecs.TaskDefinitionArgs{
+	// 		ContainerDefinitions: pulumi.String(json0),
+	// 		Cpu:                  pulumi.String("1024"),
+	// 		Family:               pulumi.String("test"),
+	// 		Memory:               pulumi.String("2048"),
+	// 		NetworkMode:          pulumi.String("awsvpc"),
+	// 		RequiresCompatibilities: pulumi.StringArray{
+	// 			pulumi.String("FARGATE"),
+	// 		},
+	// 		RuntimePlatform: &ecs.TaskDefinitionRuntimePlatformArgs{
+	// 			CpuArchitecture:       pulumi.String("X86_64"),
+	// 			OperatingSystemFamily: pulumi.String("WINDOWS_SERVER_2019_CORE"),
+	// 		},
+	// 	})
+	// if err != nil {
+	// 	return err
+	// }
+	return nil
+}
+
+func (r importRequest) runFuncLocal(ctx *pulumi.Context) error {
 	amiName, err := bundle.GetDescription(r.bundleDownloadURL)
 	if err != nil {
 		return err
@@ -180,10 +235,41 @@ func registerAMI(ctx *pulumi.Context, amiName string,
 		pulumi.RetainOnDelete(true))
 }
 
+// https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html
+func createECSTaskExecutionRole(ctx *pulumi.Context,
+	id string) (*iam.Role, pulumi.Resource, error) {
+	tpJSON, err := ecsTrustPolicyContent()
+	if err != nil {
+		return nil, nil, err
+	}
+	role, err := iam.NewRole(ctx,
+		"ecsTaskExecutionRole",
+		&iam.RoleArgs{
+			Name:             pulumi.String(id),
+			AssumeRolePolicy: pulumi.String(*tpJSON),
+			Tags:             context.GetTags(),
+		})
+	if err != nil {
+		return nil, nil, err
+	}
+	// rolePolicy, err := rolePolicyContent(id)
+	// if err != nil {
+	// 	return nil, nil, err
+	// }
+	// rolePolicyAttachment, err := iam.NewRolePolicy(ctx,
+	// 	"rolePolicy",
+	// 	&iam.RolePolicyArgs{
+	// 		Role:   role.ID(),
+	// 		Policy: pulumi.String(*rolePolicy),
+	// 	})
+	// return role, rolePolicyAttachment, err
+	return role, nil, err
+}
+
 // https://docs.aws.amazon.com/vm-import/latest/userguide/required-permissions.html
 func createVMIEmportExportRole(ctx *pulumi.Context,
 	id string) (*iam.Role, pulumi.Resource, error) {
-	tpJSON, err := trustPolicyContent()
+	tpJSON, err := vmieTrustPolicyContent()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -197,7 +283,7 @@ func createVMIEmportExportRole(ctx *pulumi.Context,
 	if err != nil {
 		return nil, nil, err
 	}
-	rolePolicy, err := rolePolicyContent(id)
+	rolePolicy, err := roleImageImporterLocalPolicyContent(id)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -210,7 +296,7 @@ func createVMIEmportExportRole(ctx *pulumi.Context,
 	return role, rolePolicyAttachment, err
 }
 
-func trustPolicyContent() (*string, error) {
+func vmieTrustPolicyContent() (*string, error) {
 	tmpJSON0, err := json.Marshal(map[string]interface{}{
 		"Version": "2012-10-17",
 		"Statement": []map[string]interface{}{
@@ -236,8 +322,52 @@ func trustPolicyContent() (*string, error) {
 	return &json, nil
 }
 
+func ecsTrustPolicyContent() (*string, error) {
+	tmpJSON0, err := json.Marshal(map[string]interface{}{
+		"Version": "2012-10-17",
+		"Statement": []map[string]interface{}{
+			{
+				"Sid":    "",
+				"Effect": "Allow",
+				"Principal": map[string]interface{}{
+					"Service": "ecs-tasks.amazonaws.com",
+				},
+				"Action": "sts:AssumeRole",
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	json := string(tmpJSON0)
+	return &json, nil
+}
+
 // TODO review s3 actions
-func rolePolicyContent(bucketName string) (*string, error) {
+func roleImageImporterRemotePolicyContent() (*string, error) {
+	tmpJSON0, err := json.Marshal(map[string]interface{}{
+		"Version": "2012-10-17",
+		"Statement": []map[string]interface{}{
+			{
+				"Effect": "Allow",
+				"Action": []string{
+					"s3:*",
+					"ecs:*",
+					"iam:*",
+					"ec2:*",
+				},
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	json := string(tmpJSON0)
+	return &json, nil
+}
+
+// TODO review s3 actions
+func roleImageImporterLocalPolicyContent(bucketName string) (*string, error) {
 	bucketNameARN := fmt.Sprintf("arn:aws:s3:::%s", bucketName)
 	bucketNameRecursiveARN := fmt.Sprintf("arn:aws:s3:::%s/*", bucketName)
 	tmpJSON0, err := json.Marshal(map[string]interface{}{

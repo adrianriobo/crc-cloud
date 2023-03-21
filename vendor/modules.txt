@@ -208,6 +208,7 @@ github.com/pkg/term/termios
 github.com/pulumi/pulumi-aws/sdk/v5/go/aws
 github.com/pulumi/pulumi-aws/sdk/v5/go/aws/ebs
 github.com/pulumi/pulumi-aws/sdk/v5/go/aws/ec2
+github.com/pulumi/pulumi-aws/sdk/v5/go/aws/ecs
 github.com/pulumi/pulumi-aws/sdk/v5/go/aws/iam
 github.com/pulumi/pulumi-aws/sdk/v5/go/aws/s3
 # github.com/pulumi/pulumi-azure-native-sdk v1.92.0
